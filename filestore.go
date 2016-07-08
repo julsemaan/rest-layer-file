@@ -1,4 +1,3 @@
-// Package mem is an example REST backend storage that stores everything in memory.
 package filestore
 
 import (
@@ -15,8 +14,7 @@ import (
 	"golang.org/x/net/context"
 )
 
-// MemoryHandler is an example handler storing data in memory
-type MemoryHandler struct {
+type FileStoreHandler struct {
 	sync.RWMutex
 	// If latency is set, the handler will introduce an artificial latency on
 	// all operations
@@ -34,38 +32,38 @@ func init() {
 }
 
 // NewHandler creates an empty memory handler
-func NewHandler(directory string, collection string) *MemoryHandler {
+func NewHandler(directory string, collection string) *FileStoreHandler {
 	os.MkdirAll(directory, 0664)
-	m := &MemoryHandler{
+	f := &FileStoreHandler{
 		items:         map[interface{}][]byte{},
 		ids:           []interface{}{},
 		directory:     directory,
 		collection:    collection,
 		database_file: directory + "/" + collection,
 	}
-	m.readDatafile()
-	return m
+	f.readDatafile()
+	return f
 }
 
 // NewSlowHandler creates an empty memory handler with specified latency
-func NewSlowHandler(latency time.Duration) *MemoryHandler {
-	return &MemoryHandler{
+func NewSlowHandler(latency time.Duration) *FileStoreHandler {
+	return &FileStoreHandler{
 		Latency: latency,
 		items:   map[interface{}][]byte{},
 		ids:     []interface{}{},
 	}
 }
 
-func (m *MemoryHandler) readDatafile() {
-	if _, err := os.Stat(m.database_file); os.IsNotExist(err) {
-		log.Println("Database " + m.database_file + " doesn't exist for collection " + m.collection)
+func (self *FileStoreHandler) readDatafile() {
+	if _, err := os.Stat(self.database_file); os.IsNotExist(err) {
+		log.Println("Database " + self.database_file + " doesn't exist for collection " + self.collection)
 		return
 	}
 
-	data, err := ioutil.ReadFile(m.database_file)
+	data, err := ioutil.ReadFile(self.database_file)
 
 	if err != nil {
-		log.Println("Error reading database file " + m.database_file)
+		log.Println("Error reading database file " + self.database_file)
 		panic(err)
 	}
 
@@ -73,54 +71,61 @@ func (m *MemoryHandler) readDatafile() {
 
 	var items map[interface{}][]byte
 	if err := dec.Decode(&items); err != nil {
-		log.Println("Error reading database file " + m.database_file)
+		log.Println("Error reading database file " + self.database_file)
 		panic(err)
 	}
+
+	for k := range self.items {
+		delete(self.items, k)
+	}
+
+	self.ids = nil
+
 	for k, v := range items {
-		m.items[k] = v
-		m.ids = append(m.ids, k)
+		self.items[k] = v
+		self.ids = append(self.ids, k)
 	}
-	log.Println("Read database " + m.database_file)
+	log.Println("Read database " + self.database_file)
 }
 
-func (m *MemoryHandler) saveDatafile() {
+func (self *FileStoreHandler) saveDatafile() {
 
-	encoded_items, err := m.serialize(&m.items)
+	encoded_items, err := self.serialize(&self.items)
 
 	if err != nil {
 		panic(err)
 	}
 
-	err = ioutil.WriteFile(m.database_file, encoded_items, 0644)
+	err = ioutil.WriteFile(self.database_file, encoded_items, 0644)
 
 	if err != nil {
 		panic(err)
 	}
 
-	log.Println("Saved database " + m.database_file)
+	log.Println("Saved database " + self.database_file)
 
 }
 
-func (m *MemoryHandler) persistData() {
-	m.saveDatafile()
-	m.readDatafile()
+func (self *FileStoreHandler) persistData() {
+	self.saveDatafile()
+	self.readDatafile()
 }
 
 // store serialize the item using gob and store it in the handler's items map
-func (m *MemoryHandler) store(item *resource.Item) error {
-	encoded_item, err := m.serialize(&item)
+func (self *FileStoreHandler) store(item *resource.Item) error {
+	encoded_item, err := self.serialize(&item)
 
 	if err != nil {
 		return err
 	}
-	m.items[item.ID] = encoded_item
+	self.items[item.ID] = encoded_item
 
-	m.persistData()
+	self.persistData()
 
 	return nil
 }
 
-func (m *MemoryHandler) serialize(item interface{}) ([]byte, error) {
+func (self *FileStoreHandler) serialize(item interface{}) ([]byte, error) {
 	var data bytes.Buffer
 	enc := gob.NewEncoder(&data)
 	if err := enc.Encode(item); err != nil {
@@ -130,8 +135,8 @@ func (m *MemoryHandler) serialize(item interface{}) ([]byte, error) {
 }
 
 // fetch unserialize item's data and return a new item
-func (m *MemoryHandler) fetch(id interface{}) (*resource.Item, bool, error) {
-	data, found := m.items[id]
+func (self *FileStoreHandler) fetch(id interface{}) (*resource.Item, bool, error) {
+	data, found := self.items[id]
 	if !found {
 		return nil, false, nil
 	}
@@ -144,38 +149,39 @@ func (m *MemoryHandler) fetch(id interface{}) (*resource.Item, bool, error) {
 }
 
 // delete removes an item by this id with no look
-func (m *MemoryHandler) delete(id interface{}) {
-	delete(m.items, id)
+func (self *FileStoreHandler) delete(id interface{}) {
+	delete(self.items, id)
 	// Remove id from id list
-	for i, _id := range m.ids {
+	for i, _id := range self.ids {
 		if _id == id {
-			if i >= len(m.ids)-1 {
-				m.ids = m.ids[:i]
+			if i >= len(self.ids)-1 {
+				self.ids = self.ids[:i]
 			} else {
-				m.ids = append(m.ids[:i], m.ids[i+1:]...)
+				self.ids = append(self.ids[:i], self.ids[i+1:]...)
 			}
 			break
 		}
 	}
-	m.persistData()
+	self.persistData()
 }
 
 // Insert inserts new items in memory
-func (m *MemoryHandler) Insert(ctx context.Context, items []*resource.Item) (err error) {
-	m.Lock()
-	defer m.Unlock()
-	err = handleWithLatency(m.Latency, ctx, func() error {
+func (self *FileStoreHandler) Insert(ctx context.Context, items []*resource.Item) (err error) {
+	self.Lock()
+	defer self.Unlock()
+	err = handleWithLatency(self.Latency, ctx, func() error {
 		for _, item := range items {
-			if _, found := m.items[item.ID]; found {
+			if _, found := self.items[item.ID]; found {
 				return resource.ErrConflict
 			}
 		}
 		for _, item := range items {
-			if err := m.store(item); err != nil {
+			// Store ids in ordered slice for sorting
+			self.ids = append(self.ids, item.ID)
+
+			if err := self.store(item); err != nil {
 				return err
 			}
-			// Store ids in ordered slice for sorting
-			m.ids = append(m.ids, item.ID)
 		}
 		return nil
 	})
@@ -183,11 +189,11 @@ func (m *MemoryHandler) Insert(ctx context.Context, items []*resource.Item) (err
 }
 
 // Update replace an item by a new one in memory
-func (m *MemoryHandler) Update(ctx context.Context, item *resource.Item, original *resource.Item) (err error) {
-	m.Lock()
-	defer m.Unlock()
-	err = handleWithLatency(m.Latency, ctx, func() error {
-		o, found, err := m.fetch(original.ID)
+func (self *FileStoreHandler) Update(ctx context.Context, item *resource.Item, original *resource.Item) (err error) {
+	self.Lock()
+	defer self.Unlock()
+	err = handleWithLatency(self.Latency, ctx, func() error {
+		o, found, err := self.fetch(original.ID)
 		if !found {
 			return resource.ErrNotFound
 		}
@@ -197,7 +203,7 @@ func (m *MemoryHandler) Update(ctx context.Context, item *resource.Item, origina
 		if original.ETag != o.ETag {
 			return resource.ErrConflict
 		}
-		if err := m.store(item); err != nil {
+		if err := self.store(item); err != nil {
 			return err
 		}
 		return nil
@@ -206,11 +212,11 @@ func (m *MemoryHandler) Update(ctx context.Context, item *resource.Item, origina
 }
 
 // Delete deletes an item from memory
-func (m *MemoryHandler) Delete(ctx context.Context, item *resource.Item) (err error) {
-	m.Lock()
-	defer m.Unlock()
-	err = handleWithLatency(m.Latency, ctx, func() error {
-		o, found, err := m.fetch(item.ID)
+func (self *FileStoreHandler) Delete(ctx context.Context, item *resource.Item) (err error) {
+	self.Lock()
+	defer self.Unlock()
+	err = handleWithLatency(self.Latency, ctx, func() error {
+		o, found, err := self.fetch(item.ID)
 		if !found {
 			return resource.ErrNotFound
 		}
@@ -220,45 +226,45 @@ func (m *MemoryHandler) Delete(ctx context.Context, item *resource.Item) (err er
 		if item.ETag != o.ETag {
 			return resource.ErrConflict
 		}
-		m.delete(item.ID)
+		self.delete(item.ID)
 		return nil
 	})
 	return err
 }
 
 // Clear clears all items from the memory store matching the lookup
-func (m *MemoryHandler) Clear(ctx context.Context, lookup *resource.Lookup) (total int, err error) {
-	m.Lock()
-	defer m.Unlock()
-	err = handleWithLatency(m.Latency, ctx, func() error {
-		ids := make([]interface{}, len(m.ids))
-		copy(ids, m.ids)
+func (self *FileStoreHandler) Clear(ctx context.Context, lookup *resource.Lookup) (total int, err error) {
+	self.Lock()
+	defer self.Unlock()
+	err = handleWithLatency(self.Latency, ctx, func() error {
+		ids := make([]interface{}, len(self.ids))
+		copy(ids, self.ids)
 		for _, id := range ids {
-			item, _, err := m.fetch(id)
+			item, _, err := self.fetch(id)
 			if err != nil {
 				return err
 			}
 			if !lookup.Filter().Match(item.Payload) {
 				continue
 			}
-			m.delete(item.ID)
+			self.delete(item.ID)
 			total++
 		}
 		return nil
 	})
-	m.persistData()
+	self.persistData()
 	return total, err
 }
 
 // Find items from memory matching the provided lookup
-func (m *MemoryHandler) Find(ctx context.Context, lookup *resource.Lookup, page, perPage int) (list *resource.ItemList, err error) {
-	m.RLock()
-	defer m.RUnlock()
-	err = handleWithLatency(m.Latency, ctx, func() error {
+func (self *FileStoreHandler) Find(ctx context.Context, lookup *resource.Lookup, page, perPage int) (list *resource.ItemList, err error) {
+	self.RLock()
+	defer self.RUnlock()
+	err = handleWithLatency(self.Latency, ctx, func() error {
 		items := []*resource.Item{}
 		// Apply filter
-		for _, id := range m.ids {
-			item, _, err := m.fetch(id)
+		for _, id := range self.ids {
+			item, _, err := self.fetch(id)
 			if err != nil {
 				return err
 			}
