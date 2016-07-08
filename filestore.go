@@ -1,9 +1,12 @@
 // Package mem is an example REST backend storage that stores everything in memory.
-package mem
+package filestore
 
 import (
 	"bytes"
 	"encoding/gob"
+	"io/ioutil"
+	"log"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -17,9 +20,12 @@ type MemoryHandler struct {
 	sync.RWMutex
 	// If latency is set, the handler will introduce an artificial latency on
 	// all operations
-	Latency time.Duration
-	items   map[interface{}][]byte
-	ids     []interface{}
+	Latency       time.Duration
+	items         map[interface{}][]byte
+	ids           []interface{}
+	directory     string
+	collection    string
+	database_file string
 }
 
 func init() {
@@ -28,11 +34,17 @@ func init() {
 }
 
 // NewHandler creates an empty memory handler
-func NewHandler() *MemoryHandler {
-	return &MemoryHandler{
-		items: map[interface{}][]byte{},
-		ids:   []interface{}{},
+func NewHandler(directory string, collection string) *MemoryHandler {
+	os.MkdirAll(directory, 0664)
+	m := &MemoryHandler{
+		items:         map[interface{}][]byte{},
+		ids:           []interface{}{},
+		directory:     directory,
+		collection:    collection,
+		database_file: directory + "/" + collection,
 	}
+	m.readDatafile()
+	return m
 }
 
 // NewSlowHandler creates an empty memory handler with specified latency
@@ -44,15 +56,77 @@ func NewSlowHandler(latency time.Duration) *MemoryHandler {
 	}
 }
 
+func (m *MemoryHandler) readDatafile() {
+	if _, err := os.Stat(m.database_file); os.IsNotExist(err) {
+		log.Println("Database " + m.database_file + " doesn't exist for collection " + m.collection)
+		return
+	}
+
+	data, err := ioutil.ReadFile(m.database_file)
+
+	if err != nil {
+		log.Println("Error reading database file " + m.database_file)
+		panic(err)
+	}
+
+	dec := gob.NewDecoder(bytes.NewBuffer(data))
+
+	var items map[interface{}][]byte
+	if err := dec.Decode(&items); err != nil {
+		log.Println("Error reading database file " + m.database_file)
+		panic(err)
+	}
+	for k, v := range items {
+		m.items[k] = v
+		m.ids = append(m.ids, k)
+	}
+	log.Println("Read database " + m.database_file)
+}
+
+func (m *MemoryHandler) saveDatafile() {
+
+	encoded_items, err := m.serialize(&m.items)
+
+	if err != nil {
+		panic(err)
+	}
+
+	err = ioutil.WriteFile(m.database_file, encoded_items, 0644)
+
+	if err != nil {
+		panic(err)
+	}
+
+	log.Println("Saved database " + m.database_file)
+
+}
+
+func (m *MemoryHandler) persistData() {
+	m.saveDatafile()
+	m.readDatafile()
+}
+
 // store serialize the item using gob and store it in the handler's items map
 func (m *MemoryHandler) store(item *resource.Item) error {
-	var data bytes.Buffer
-	enc := gob.NewEncoder(&data)
-	if err := enc.Encode(*item); err != nil {
+	encoded_item, err := m.serialize(&item)
+
+	if err != nil {
 		return err
 	}
-	m.items[item.ID] = data.Bytes()
+	m.items[item.ID] = encoded_item
+
+	m.persistData()
+
 	return nil
+}
+
+func (m *MemoryHandler) serialize(item interface{}) ([]byte, error) {
+	var data bytes.Buffer
+	enc := gob.NewEncoder(&data)
+	if err := enc.Encode(item); err != nil {
+		return nil, err
+	}
+	return data.Bytes(), nil
 }
 
 // fetch unserialize item's data and return a new item
@@ -83,6 +157,7 @@ func (m *MemoryHandler) delete(id interface{}) {
 			break
 		}
 	}
+	m.persistData()
 }
 
 // Insert inserts new items in memory
@@ -171,6 +246,7 @@ func (m *MemoryHandler) Clear(ctx context.Context, lookup *resource.Lookup) (tot
 		}
 		return nil
 	})
+	m.persistData()
 	return total, err
 }
 

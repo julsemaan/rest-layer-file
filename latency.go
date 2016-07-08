@@ -1,4 +1,4 @@
-package mem
+package filestore
 
 import (
 	"time"
