@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rs/rest-layer/resource"
+	"github.com/rs/rest-layer/rest"
+	"github.com/rs/rest-layer/schema"
 	"golang.org/x/net/context"
 )
 
@@ -24,6 +26,7 @@ type FileStoreHandler struct {
 	directory     string
 	collection    string
 	database_file string
+	UniqueFields  []string
 }
 
 func init() {
@@ -32,7 +35,7 @@ func init() {
 }
 
 // NewHandler creates an empty memory handler
-func NewHandler(directory string, collection string) *FileStoreHandler {
+func NewHandler(directory string, collection string, uniqueFields []string) *FileStoreHandler {
 	os.MkdirAll(directory, 0664)
 	f := &FileStoreHandler{
 		items:         map[interface{}][]byte{},
@@ -40,6 +43,7 @@ func NewHandler(directory string, collection string) *FileStoreHandler {
 		directory:     directory,
 		collection:    collection,
 		database_file: directory + "/" + collection,
+		UniqueFields:  uniqueFields,
 	}
 	f.readDatafile()
 	return f
@@ -170,10 +174,27 @@ func (self *FileStoreHandler) Insert(ctx context.Context, items []*resource.Item
 	self.Lock()
 	defer self.Unlock()
 	err = handleWithLatency(self.Latency, ctx, func() error {
+
 		for _, item := range items {
 			if _, found := self.items[item.ID]; found {
 				return resource.ErrConflict
 			}
+
+			for _, uniqueField := range self.UniqueFields {
+				lookup := resource.NewLookup()
+				queries := schema.Query{}
+				queries = append(queries, schema.Equal{Field: uniqueField, Value: item.Payload[uniqueField]})
+				lookup.AddQuery(queries)
+				res, err := self.findNoLock(ctx, lookup, 1, -1)
+				if err != nil {
+					return err
+				}
+
+				if len(res.Items) > 0 {
+					return &rest.Error{422, "Unique precondition failed on field '" + uniqueField + "'", nil}
+				}
+			}
+
 		}
 		for _, item := range items {
 			// Store ids in ordered slice for sorting
@@ -260,6 +281,10 @@ func (self *FileStoreHandler) Clear(ctx context.Context, lookup *resource.Lookup
 func (self *FileStoreHandler) Find(ctx context.Context, lookup *resource.Lookup, page, perPage int) (list *resource.ItemList, err error) {
 	self.RLock()
 	defer self.RUnlock()
+	return self.findNoLock(ctx, lookup, page, perPage)
+}
+
+func (self *FileStoreHandler) findNoLock(ctx context.Context, lookup *resource.Lookup, page, perPage int) (list *resource.ItemList, err error) {
 	err = handleWithLatency(self.Latency, ctx, func() error {
 		items := []*resource.Item{}
 		// Apply filter
